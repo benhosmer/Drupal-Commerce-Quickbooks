@@ -1,0 +1,41 @@
+<?php
+function commerce_qb_webconnect_schema() {
+  $schema['commerce_qb_exports'] = array(
+    // example (partial) specification for table "node"
+    'description' => 'Record of commerce items exported to Quickbooks.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Unique id',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'item_id' => array(
+        'description' => 'Entity neutral id of commerce action.',
+        'type' => 'int',
+        'length' => 10,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'item_type' => array(
+        'description' => 'Type of entity.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'status_code' => array(
+        'description' => 'Code for process outcome.',
+        'type' => 'int',
+        'length' => 10,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'indexes' => array(
+      'item_id' => array('item_id'),
+    ),
+    'primary key' => array('id'),
+  );
+  return $schema;
+}
