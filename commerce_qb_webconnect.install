@@ -1,7 +1,6 @@
 <?php
 function commerce_qb_webconnect_schema() {
   $schema['commerce_qb_exports'] = array(
-    // example (partial) specification for table "node"
     'description' => 'Record of commerce items exported to Quickbooks.',
     'fields' => array(
       'id' => array(
@@ -37,5 +36,6 @@ function commerce_qb_webconnect_schema() {
     ),
     'primary key' => array('id'),
   );
+  
   return $schema;
 }

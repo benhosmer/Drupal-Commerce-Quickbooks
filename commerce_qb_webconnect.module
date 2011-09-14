@@ -5,8 +5,22 @@ define('commerce_qb_webconnect_QB_PENDING', 1);
 define('commerce_qb_webconnect_QB_DONE', 0);
 
 // tax type
+// @TODO move this out of here
 define('commerce_qb_webconnect_QB_MI_TAX', 'MI Sales Tax');
 define('commerce_qb_webconnect_QB_ZERO_TAX', 'Local Tax');
+
+/*
+ * Implements hook_hook_info().
+ */
+function commerce_qb_webconnect_hook_info() {
+  $hooks = array(
+    'commerce_qb_line_item_products_alter' => array(
+      'group' => 'commerce',
+    ),
+  );
+  
+  return $hooks;
+}
 
 /*
  * Implements hook_permission()
@@ -17,6 +31,10 @@ function commerce_qb_webconnect_permission(){
       'title' => t('Access Quickbooks SOAP'),
       'description' => t('Authenticate with Quickbooks resources through SOAP endpoints.'),
     ),
+    'administer qb webconnect' => array(
+      'title' => t('Administer Commerce QB Webconnect'),
+      'description' => t('Change config and logging settings for Commerce QB Webconnect.'),
+    ),      
   );
 }
 
@@ -87,26 +105,134 @@ function commerce_qb_webconnect_services_resources() {
 }
 
 /*
+ * Implements hook_menu().
+ */
+function commerce_qb_webconnect_menu(){
+  $items['admin/config/commerce_qb_webconnect'] = array(
+    'title' => t('Commerce QB Webconnect settings'),
+    'description' => t('Settings for Commerce QB Webconnect.'),
+    'page callback' => 'system_admin_menu_block_page',
+    'access arguments' => array('administer qb webconnect'),
+    'file' => 'system.admin.inc',
+    'file path' => drupal_get_path('module', 'system'),
+    'position' => 'right',
+    'weight' => -5,
+  );  
+  
+  $items['admin/config/commerce_qb_webconnect/settings'] = array(
+    'title' => t('Commerce QB Webconnect settings'),
+    'description' => t('Logging and configuration settings for Commerce QB Webconnect.'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_qb_webconnect_admin_form'),
+    'access arguments' => array('administer qb webconnect'),
+  );
+
+  return $items;
+}
+
+function commerce_qb_webconnect_admin_form(){
+  $form['commerce_qb_webconnect_enable_logging'] = array(
+    '#title' => t('Enable logging'),
+    '#description' => t('Write QB Webconnect update details to log file'),
+    '#type' => 'checkbox',
+    '#default_value' => variable_get('commerce_qb_webconnect_enable_logging', 0)
+  );
+  
+  $form['commerce_qb_webconnect_truncate_log'] = array(
+    '#title' => t('Truncate log before update'),
+    '#description' => t('If set, each update run will overwrite the last one recorded in the log.'),
+    '#type' => 'checkbox',
+    '#default_value' => variable_get('commerce_qb_webconnect_truncate_log', 0)
+  );  
+    
+  $scheme = variable_get('file_default_scheme', 'public');
+  $path = variable_get('file_' . $scheme . '_path', '');
+  
+  $form['commerce_qb_webconnect_log_filepath'] = array(
+      '#title' => t('Path to log file'),
+    '#description' => t('Must be writeable by webserver'),
+    '#type' => 'textfield',
+    '#default_value' => variable_get('commerce_qb_webconnect_log_filepath', $path . '/commerce_qb_webconnect'),
+  );
+  
+  $form['update_exports'] = array(
+    '#type' => 'submit',
+    '#value' => t('Update exports table'),
+    '#suffix' => '<div ' . drupal_attributes(array('class' => array('description'))) . '>' . t('Populate exports table with new orders, products and customers.') . '</div>',
+  );
+  
+  $form['#submit'][] = 'commerce_qb_webconnect_admin_form_submit';
+  
+  return system_settings_form($form);
+}
+
+/*
+ * Validation handler for admin form
+ */
+function commerce_qb_webconnect_admin_form_validate(&$form, &$form_state){
+  $path = $form_state['values']['commerce_qb_webconnect_log_filepath'];
+  
+  if (!is_writable($path) && !mkdir($path)){
+    form_set_error('commerce_qb_webconnect_log_filepath', t('File path ' . $path . 'is not writeable'));
+  }
+}
+
+/*
+ * Submit handler for admin form
+ */
+function commerce_qb_webconnect_admin_form_submit(&$form, &$form_state){
+  $entities = array(
+    'commerce_order' => entity_load('commerce_order'),
+    'commerce_customer_profile' => entity_load('commerce_customer_profile'),
+    'commerce_product' => entity_load('commerce_product'),
+  );
+  
+  foreach ($entities as $type => $type_entity_list){
+    foreach ($type_entity_list as $type_entity){
+      $operations[] = array('commerce_qb_webconnect_qb_export_batch_save', array($type_entity, $type));
+    }
+  }
+  
+  $batch = array(
+    'operations' => $operations,
+    'finished' => 'commerce_qb_webconnect_batch_export_update_finished'
+  );
+  
+  batch_set($batch);
+}
+
+/*
+ * Finished callback for update exports table action
+ */
+function commerce_qb_webconnect_batch_export_update_finished($success, $results, $operations){
+  $count = count($results);
+  $msg = $count > 0 ? t($count . ' export records added.') : t('Export table already up to date.');
+  
+  drupal_set_message('Batch update finished. ' . $msg);
+}
+
+/*
  * Implements hook_soap_server_wsdl()
  */
-function commerce_qb_webconnect_soap_server_wsdl($endpoint){
-  watchdog('QB Webconnect', 'endpoint object: <pre>' . print_r($endpoint, true) . '</pre>');
-  
+function commerce_qb_webconnect_soap_server_wsdl($endpoint){  
   if ($endpoint->name == 'SOAP'){
-    return file_get_contents('http://developer.intuit.com/uploadedFiles/Support/QBWebConnectorSvc.wsdl');
+    return array(
+      file_get_contents('http://developer.intuit.com/uploadedFiles/Support/QBWebConnectorSvc.wsdl')
+    );
   }
 }
 
 /*
  * Implements hook_entity_info()
  */
+
 function commerce_qb_webconnect_entity_info() {
   return array(
     'commerce_qb_webconnect_qb_export' => array(
       'label' => t('Quickbooks export item'),
       'entity class' => 'Entity',
       'controller class' => 'EntityAPIController',
-      'base table' => 'commerce_qb_webconnect_qb_exports',
+      'base table' => 'commerce_qb_exports',
       'entity keys' => array(
         'id' => 'id',
         'label' => 'item_type'
@@ -118,16 +244,13 @@ function commerce_qb_webconnect_entity_info() {
 /*
  * Implements hook_entity_insert()
  */
-function commerce_qb_webconnect_entity_insert($entity, $type){
-  watchdog('QB Webconnect', 'entity type: ' . $type);
-  
+function commerce_qb_webconnect_entity_insert($entity, $type){  
   switch ($type){
     case 'commerce_order':
     case 'commerce_product':
     case 'commerce_payment_transaction':
     case 'commerce_line_item':
     case 'commerce_customer_profile':
-      //watchdog('QB Webconnect', 'update array:<pre> ' . print_r($entity, true) . '</pre>');
       $id = null;
       
       // products have to be accessed through their line item
@@ -152,8 +275,6 @@ function commerce_qb_webconnect_entity_insert($entity, $type){
         'status_code' => 1
       );
       
-      //watchdog('QB Webconnect', 'update array:<pre> ' . print_r($qb_update, true) . '</pre>');
-      
       // check for duplicates and write to table
       commerce_qb_webconnect_qb_export_write((object)$qb_update);
       
@@ -166,6 +287,56 @@ function commerce_qb_webconnect_entity_insert($entity, $type){
  */
 function commerce_qb_webconnect_entity_delete($entity, $type){
   
+}
+
+/**
+ * Entity type neutral wrapper for commerce_qb_webconnect_qb_export_write()
+ * 
+ * @param Entity $entity
+ *  Entity for which to save a QB export
+ * 
+ * @param string $type 
+ *  Entity type
+ */
+function commerce_qb_webconnect_qb_export_save($entity, $type){
+  $id = null;
+
+  // products have to be accessed through their line item
+  if ($type == 'commerce_line_item' && $entity->type == 'product'){
+    $type = 'commerce_product';
+    $id = $entity->commerce_product['und'][0]['product_id'];
+  }
+
+  // orders have to be accessed via payment transaction
+  if ($type == 'commerce_payment_transaction'){
+    $type = 'commerce_order';
+    $id = $entity->order_id;
+  }
+
+  if (!$id){
+    $id = entity_id($type, $entity);
+  }
+
+  $qb_update = array(
+    'item_id' => $id,
+    'item_type' => $type,
+    'status_code' => 1
+  );
+
+  // check for duplicates and write to table
+  $export = commerce_qb_webconnect_qb_export_write((object)$qb_update);
+  
+  if ($export){
+    return $export;
+  }
+}
+
+function commerce_qb_webconnect_qb_export_batch_save($entity, $type, &$context){
+  $export = commerce_qb_webconnect_qb_export_save($entity, $type);
+  
+  if($export){
+    $context['results'][] = $export;
+  }
 }
 
 /*
@@ -189,6 +360,8 @@ function commerce_qb_webconnect_entity_delete($entity, $type){
  * Return the server version to the client. Runs pre-authentication.
  */
 function commerce_qb_webconnect_qb_serverVersion($request){
+  cqbc_log_block_start();
+  cqbc_log_write('Method: [serverVersion] called');
   $return->serverVersionResult = '1.0';
   return $return;
 }
@@ -198,6 +371,7 @@ function commerce_qb_webconnect_qb_serverVersion($request){
  * authentication procedure.
  */
 function commerce_qb_webconnect_qb_authenticate($request){
+  cqbc_log_write('Method: [authenticate] called');
   $strUserName = $request->strUserName;
   $strPassword = $request->strPassword;
 
@@ -208,8 +382,10 @@ function commerce_qb_webconnect_qb_authenticate($request){
 
   if ($login->sessid){
     $retVal = array($login->sessid, '');
+    cqbc_log_write('User ' . $strUserName . ' authenticated');
   } else {
     $retVal = array(session_id(), 'nvu');
+    cqbc_log_write('User ' . $strUserName . ' failed to authenticate');
   }
 
   $return->authenticateResult = $retVal;
@@ -221,6 +397,7 @@ function commerce_qb_webconnect_qb_authenticate($request){
  */
 function commerce_qb_webconnect_qb_clientVersion($request){
   $strVersion = $request->strVersion;
+  cqbc_log_write('Method: [clientVersion] called');
 
   $return->clientVersionResult = '';
   return $return;
@@ -233,28 +410,32 @@ function commerce_qb_webconnect_qb_clientVersion($request){
  */
 function commerce_qb_webconnect_qb_sendRequestXML($request){
   $sid = $request->ticket;
+  cqbc_log_write('Method: [sendRequestXML] called');
   
   if (!commerce_qb_webconnect_check_session($sid)){
     return false;
   }
 
+  cqbc_log_write('Searching for next export ...');
   $item = commerce_qb_webconnect_get_next_export();
-  watchdog('QB Webconnect', 'next item in sendRequest: <pre>' . print_r($item, true) . '</pre>');
 
   if ($item){
+    cqbc_log_write("Export found");
 
     // send to xml render procedure
+    cqbc_log_write('Rendering qbxml ...');
     $qbxml = commerce_qb_webconnect_render_qbxml($item);
+    cqbc_log_write('qbxml rendered successfully');
 
     if ($qbxml){
       $value = $qbxml;
     }
   } else {
+    cqbc_log_write('No export found, jobs finished');
     $value = '';
   }
 
   $return->sendRequestXMLResult = $value;
-  watchdog('QB Webconnect', 'value of sendRequestXML: <pre>' . htmlentities(print_r($value, true)) . '</pre>');
   return $return;
 }
 
@@ -264,38 +445,31 @@ function commerce_qb_webconnect_qb_sendRequestXML($request){
  */
 function commerce_qb_webconnect_qb_receiveResponseXML($request){
   $sid = $request->ticket;
+  cqbc_log_write('Method: [receiveResponseXML called');
   
   if (!commerce_qb_webconnect_check_session($sid)){
     return false;
   }
+  
+  //cqbc_log_write('Request:', $request);
 
   //find out which item the response pertains to
   $item = commerce_qb_webconnect_get_next_export();
-  watchdog('QB Webconnect', 'pending item from receive response: <pre>' . print_r($item, true) . '</pre>');
-  watchdog('QB Webconnect', 'request argument from receive response: <pre>' . print_r($request, true) . '</pre>');
 
   if ($item){
     $qb_export = commerce_qb_webconnect_next_in_queue($item->entity_type);
     commerce_qb_webconnect_qb_export_complete($qb_export);
   }
-/*
-  $remaining = commerce_qb_webconnect_qb_exports_remaining();
-
-  if ($remaining < 1){
-    $return->receiveResponseXMLResult = 100;
-  } else {
-    $return->receiveResponseXMLResult = 50;
-  }
-  */
-  watchdog('QB Webconnect', 'request response from receive response: ' . htmlentities($request->response));
+  
   return $return;
 }
 
 /*
- * Called if sendRequestXML or receiveResponseXML returns an error code. Requires authentication.
+ * Called if sendRequestXML or receiveResponseXML returns an error code. Requires authentication. 
+ * This function seems to actually get called at the end of every request cycle.
  */
 function commerce_qb_webconnect_qb_getLastError($request){
-  watchdog('QB Webconnect', 'logging getLastError. vars: ' . print_r($request, true));
+  cqbc_log_write('Method: [getLastError] called');
   $sid = $request->ticket;
 
   if (!commerce_qb_webconnect_check_session($sid)){
@@ -315,14 +489,17 @@ function commerce_qb_webconnect_qb_getLastError($request){
  * Close the connection to the QBWC client.
  */
 function commerce_qb_webconnect_qb_closeConnection($request){
+  cqbc_log_write('Method: [closeConnection] called');
   $sid = $request->ticket;
 
   if (!commerce_qb_webconnect_check_session($sid)){
+    cqbc_log_block_end();
     return false;
   }
 
   // allow connection to close
   $return->closeConnectionResult = 'OK';
+  cqbc_log_block_end();
   return $return;
 }
 
@@ -332,16 +509,15 @@ function commerce_qb_webconnect_qb_closeConnection($request){
  * Determine whether or not session is valid and user has access quickbooks SOAP permission
  *
  * @global object $user
- * user object
+ *  user object
  *
  * @param string $sid
- * session token
+ *  session token
  *
  * @return boolean
  */
 function commerce_qb_webconnect_check_session($sid){
   global $user;
-  //watchdog('QB Webconnect', 'User loaded from ' . $sid . ': <pre>' . print_r($user, true) . '</pre>');
   
   // load the session
   _drupal_session_read($sid);
@@ -350,7 +526,7 @@ function commerce_qb_webconnect_check_session($sid){
     return true;
   }
   
-  watchdog('QB Webconnect', 'authentication failed for ' . $sid);
+  cqbc_log_write('User session invalid');
 }
 
 
@@ -452,33 +628,34 @@ function commerce_qb_webconnect_next_in_queue($type = null){
  */
 function commerce_qb_webconnect_render_qbxml($entity){
   $qbxml = '';
-  watchdog('QB Webconnect', 'entity in commerce_qb_webconnect_render_qbxml: <pre>' . print_r($entity, true) . '</pre>');
   
   switch ($entity->entity_type){
     case 'commerce_customer_profile':
       $customer = $entity->commerce_customer_address['und'][0];
       
-      $qbxml .= '
+      $qbxml .= "
         <CustomerAddRq>
           <CustomerAdd>
-            <Name>' . $customer['name_line'] . '</Name>
-            <CompanyName>' . $customer['organisation_name'] . '</CompanyName>
-            <FirstName>' . $customer['first_name'] . '</FirstName>
-            <LastName> ' . $customer['last_name'] . '</LastName>
+            <Name>" . $customer["name_line"] . "</Name>
+            <CompanyName>" . $customer["organisation_name"] . "</CompanyName>
+            <FirstName>" . $customer["first_name"] . "</FirstName>
+            <LastName> " . $customer["last_name"] . "</LastName>
             <BillAddress>
-              <Addr1>' . $customer['premise'] . '</Addr1>
-              <Addr2>' . $customer['sub_premise'] . '</Addr2>
-              <Addr3>' . $customer['thoroughfare'] . '</Addr3>
-              <City>' . $customer['locality'] . '</City>
-              <State>' . $customer['administrative_area'] . '</State>
-              <PostalCode>' . $customer['postal_code'] . '</PostalCode>
-              <Country>' . $customer['country'] . '</Country>
+              <Addr1>" . $customer["premise"] . "</Addr1>
+              <Addr2>" . $customer["sub_premise"] . "</Addr2>
+              <Addr3>" . $customer["thoroughfare"] . "</Addr3>
+              <City>" . $customer["locality"] . "</City>
+              <State>" . $customer["administrative_area"] . "</State>
+              <PostalCode>" . $customer["postal_code"] . "</PostalCode>
+              <Country>" . $customer["country"] . "</Country>
             </BillAddress>
-            <Phone>' . $entity->field_phone['und'][0]['value'] . '</Phone>
-            <Email>' . $entity->field_email['und'][0]['value'] . '</Email>
-            <Contact>' . $customer['name_line'] . '</Contact>
+            <Phone>" . $entity->field_phone["und"][0]["value"] . "</Phone>
+            <Email>" . $entity->field_email["und"][0]["value"] . "</Email>
+            <Contact>" . $customer["name_line"] . "</Contact>
           </CustomerAdd>
-        </CustomerAddRq>';
+        </CustomerAddRq>\n";
+      
+      //cqbc_log_write('customer qbxml', $qbxml);
 
       break;
     case 'commerce_product':
@@ -509,19 +686,25 @@ function commerce_qb_webconnect_render_qbxml($entity){
       $profile = commerce_customer_profile_load($profile_id);
       $profile_info = $profile->commerce_customer_address['und'][0];
 
-      watchdog('QB Webconnect', 'profile entity in commerce_qb_webconnect_render_qbxml: <pre>' . print_r($profile, true) . '</pre>');
-
       // add tax if billing address is in Michigan
+      // @TODO move this out of here
       $tax = ($profile_info['administrative_area'] == 'MI') ? commerce_qb_webconnect_QB_MI_TAX : commerce_qb_webconnect_QB_ZERO_TAX;
 
       // load products
       $products = commerce_qb_webconnect_line_item_products($entity);
+      
+      // allow modules to alter the list of products being exported with this order
+      drupal_alter('commerce_qb_webconnect_order_products', $products, $entity);
 
       if (!empty($products)){
         $products_qbxml = '';
         
         foreach ($products as $product){
-          $price = $product->commerce_price['und'][0]['amount'];
+          $amount = $product->commerce_price['und'][0]['amount'];          
+          $price = commerce_currency_format($amount, commerce_default_currency());
+          
+          // remove currency sign
+          $price = substr($price, 1);
 
           $products_qbxml .= '
             <InvoiceLineAdd>
@@ -567,6 +750,8 @@ function commerce_qb_webconnect_render_qbxml($entity){
             $products_qbxml .
           '</InvoiceAdd>
         </InvoiceAddRq>';
+      
+      cqbc_log_write('order qbxml', $qbxml);
       
       break;
   }
@@ -622,8 +807,8 @@ function commerce_qb_webconnect_qb_export_write($export){
   if ($count < 1){
 
     // write a new record
-    entity_save('commerce_qb_webconnect_qb_export', $export);
-    return true;
+    $entity = entity_save('commerce_qb_webconnect_qb_export', $export);
+    return $entity;
   }
 }
 
@@ -648,7 +833,6 @@ function commerce_qb_webconnect_qb_exports_pending(){
  */
 function commerce_qb_webconnect_qb_export_complete($export){
   $export->status_code = commerce_qb_webconnect_QB_DONE;
-  watchdog('QB Webconnect', 'export item to be closed: <pre>' . print_r($export, true) . '</pre>');
 
   // save the entity
   entity_save('commerce_qb_webconnect_qb_export', $export);
@@ -691,70 +875,107 @@ function commerce_qb_webconnect_line_item_products($order, $array_key = 'product
 
   return $products;
 }
-/* Commented out; future functionality that is under development.
-function commerce_qb_webconnect_form_alter(&$form, &$form_state, $form_id){
 
-  switch ($form_id){
-    case 'commerce_checkout_form_checkout':
-
-      // add script to calculate taxes
-      drupal_add_js(drupal_get_path('module', 'commerce_qb_webconnect') . '/taxes.js');
-
-      // add order id as a setting
-      $oid = $form_state['order']->order_id;
-      drupal_add_js(array('commerce_qb_webconnect' => array('oid' => $oid)), 'setting');
-      
-      break;
-  }
-}
-
-function commerce_qb_webconnect_menu() {
-  $items['commerce_qb_webconnect/set_tax'] = array(
-    'title' => 'commerce_qb_webconnect_ajax_set_tax',
-    'page callback' => 'commerce_qb_webconnect_set_tax',
-    'access arguments' => array('access content'),
-    'type' => MENU_CALLBACK,
-  );
-
-  return $items;
-}
-
-function commerce_qb_webconnect_set_tax(){
-  $oid = $_POST['oid'];
-  $state = $_POST['state'];
-
-  if (!is_numeric($oid)){
-    drupal_json_output('invalid entry for oid');
-  }
-
-  $order = commerce_order_load($oid);
-
-  if ($state == 'MI'){
-
-    // determine which line items are products
-    $products = commerce_qb_webconnect_line_item_products($order, 'line_item_id');
-    $tax_rates = commerce_tax_rates();
-
-    // find michigan tax rate
-    $mi_tax_rate = $tax_rates['michigan_tax'];
-    
-    foreach ($products as $line_item_id => $product){
-
-      // load the line item
-      $line_item = commerce_line_item_load($line_item_id);
-
-      // apply tax to line item
-      commerce_tax_rate_apply($mi_tax_rate, $line_item);
-      commerce_line_item_save($line_item);
-      
-      $json = $mi_tax_rate['rate'];
-    }
-  } else {
-
-      // no tax if address not in michigan
-      $json = 0;
-  }
-
-  drupal_json_output($json);
-}
+/**
+ * Write a line to the qbclog
+ * 
+ * @param string $msg
+ *  The message to log
+ * 
+ * @param type $variable
+ *  A variable to print
+ * 
+ * @param type $indent 
+ *  Whether or not to indent
  */
+function cqbc_log_write($msg, $variable = null, $indent = true){
+  if (!variable_get('commerce_qb_webconnect_enable_logging', 0)){
+    return;
+  }
+  
+  $handle = _cqbc_log_open();
+  $margin = $indent ? '  * ' : '';
+  
+  // double quotes are needed
+  $string = $margin . $msg . "\n";
+  
+  if ($variable){
+    $dump = '';
+    
+    if (is_array($variable) || is_object($variable)){
+      cqbc_dump_to_string($variable, $dump);
+    } else {
+      $dump = $variable;
+    }
+    
+    $string .= $dump . "\n";
+  }
+  
+  fwrite($handle, $string);
+  fclose($handle);
+}
+
+/**
+ * Open a handler for the qbclog file
+ * 
+ * @param string $mode
+ *  Mode argument for fopen
+ * 
+ * @return file resource
+ */
+function _cqbc_log_open($mode = 'a'){
+  $path = variable_get('commerce_qb_webconnect_log_filepath', '');
+  $logpath = $path . '/qbclog.txt';  
+  
+  if (!is_file($logpath) && !touch($logpath)){        
+    watchdog('QB Webconnect', t('Could not create Commerce QB Connect log file.'));
+    return;
+  }
+  
+  $handle = fopen($logpath, $mode);
+  return $handle;
+}
+
+/*
+ * Print a block opening for an update run
+ */
+function cqbc_log_block_start(){
+  if (variable_get('commerce_qb_webconnect_truncate_log', 0)){
+    
+    // truncate log
+    $handle = _cqbc_log_open('w');
+    fclose($handle);
+  }
+  
+  cqbc_log_write('-- Start update: ' . date('Y-m-d G:i:s') . ' --', null, false);
+}
+
+/*
+ * Print a block closure for an update run
+ */
+function cqbc_log_block_end(){
+  cqbc_log_write("-- End update: " . date('Y-m-d G:i:s') . " --\n", null, false);
+}
+
+/**
+ * Given a variable, render it recursively in readable plaintext.
+ * Via http://php.net/manual/en/function.var-dump.php :: flyfy1
+ * 
+ * @param mixed $var
+ *  Variable to dump
+ * 
+ * @param $output
+ *  Referenced container variable
+ * 
+ * @return string 
+ */
+function cqbc_dump_to_string($var,&$output,$prefix=""){
+  foreach($var as $key=>$value){
+    if(is_array($value)){
+        $output.= '  ' . $prefix.$key.": \n";
+        cqbc_dump_to_string($value,$output,"  ".$prefix);
+    } else{
+        $output.= '  ' . $prefix.$key.": ".$value."\n";
+    }
+  }
+}
