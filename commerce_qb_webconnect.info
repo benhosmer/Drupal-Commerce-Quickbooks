@@ -1,4 +1,7 @@
 name = Drupal Commerce Quickbooks Webconnect
 description = Provides a realtime integration between Drupal Commerce and Quickbooks via the Intuit Webconnect utility
 core = 7.x
-dependencies = soap_server
+dependencies[] = soap_server
+dependencies[] = services
+package = Commerce (contrib)
+files[] = commerce_qb_wbconnect.module
